@@ -1,8 +1,13 @@
-# -*- coding: utf-8 -*-
+      # -*- coding: utf-8 -*-
 """
-Diamond Squad - Bot Telegram pou top-up Free Fire
-Flux: Client chwazi pak -> antre ID FF -> chwazi peman -> voye referans/prèv
-      -> Bot voye kòmand la BAY ADMIN -> Admin konfime -> Bot avize client
+Diamond Squad - Bot Telegram pou top-up Free Fire (VERSION 2)
+Estil GamexBulk/EpinBy: meni pèsistan anba a + sistèm Wallet (kont/balans)
+
+Flux Wallet:
+  Client ajoute lajan (peye NatCash/MonCash, voye prèv) -> Admin apwouve
+  -> Balans kredite -> Client achte dyaman ENSTANTANEMAN ak balans li
+  (pa bezwen voye prèv chak fwa li achte)
+
 Pa gen sit web ki nesesè - tout bagay pase sou Telegram.
 """
 
@@ -20,7 +25,7 @@ from flask import Flask
 # KONFIGIRASYON - CHANJE VALÈ SA YO ANVAN OU DEPLOYE
 # ============================================================
 BOT_TOKEN = "8636770943:AAGazL45aqH3uzb21Ak6xp_pUx0SNReacs4"
-ADMIN_CHAT_ID = 8313303472                          # ID Telegram pa ou (wè enstriksyon anba a)
+ADMIN_CHAT_ID = 8313303472                          # ID Telegram pa ou
 
 NATCASH_NUMBER = "+509 32596064"
 MONCASH_NUMBER = "+509 31766988"
@@ -37,6 +42,9 @@ PACKAGES = {
     "pkg_7": {"label": "💎 5000 + 1160 Bonus Dyaman", "price": 8750},
 }
 
+# Kantite lajan pwopoze pou "Ajoute Lajan" (an HTG)
+TOPUP_AMOUNTS = [250, 500, 1000, 2500, 5000]
+
 # ============================================================
 logging.basicConfig(level=logging.INFO)
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
@@ -44,6 +52,15 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 # ------------------ BAZ DÒNE (SQLite) ------------------
 conn = sqlite3.connect("orders.db", check_same_thread=False)
 cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    chat_id INTEGER PRIMARY KEY,
+    username TEXT,
+    balance REAL DEFAULT 0
+)
+""")
+
 cur.execute("""
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +69,17 @@ CREATE TABLE IF NOT EXISTS orders (
     package_label TEXT,
     price INTEGER,
     ff_id TEXT,
+    status TEXT DEFAULT 'PANN',
+    created_at TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS deposits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_chat_id INTEGER,
+    client_username TEXT,
+    amount REAL,
     payment_method TEXT,
     reference TEXT,
     status TEXT DEFAULT 'PANN',
@@ -60,37 +88,109 @@ CREATE TABLE IF NOT EXISTS orders (
 """)
 conn.commit()
 
-# Estoke eta konvèsasyon chak client an memwa (senp, pa bezwen redis pou volim sa a)
+# Estoke eta konvèsasyon chak client an memwa
 user_state = {}
 
 # ============================================================
-# /start - Meni prensipal
+# Ti fonksyon pou jere itilizatè ak balans
+# ============================================================
+def ensure_user(chat_id, username):
+    cur.execute("SELECT chat_id FROM users WHERE chat_id=?", (chat_id,))
+    if not cur.fetchone():
+        cur.execute("INSERT INTO users (chat_id, username, balance) VALUES (?, ?, 0)",
+                    (chat_id, username))
+        conn.commit()
+    else:
+        cur.execute("UPDATE users SET username=? WHERE chat_id=?", (username, chat_id))
+        conn.commit()
+
+def get_balance(chat_id):
+    cur.execute("SELECT balance FROM users WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    return row[0] if row else 0
+
+def add_balance(chat_id, amount):
+    cur.execute("UPDATE users SET balance = balance + ? WHERE chat_id=?", (amount, chat_id))
+    conn.commit()
+
+def deduct_balance(chat_id, amount):
+    cur.execute("UPDATE users SET balance = balance - ? WHERE chat_id=?", (amount, chat_id))
+    conn.commit()
+
+# ============================================================
+# Meni pèsistan (anba a, tankou GamexBulk/EpinBy)
+# ============================================================
+def main_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton("💎 Achte Dyaman"),
+        types.KeyboardButton("💰 Kont Mwen"),
+    )
+    markup.add(
+        types.KeyboardButton("➕ Ajoute Lajan"),
+        types.KeyboardButton("📦 Kòmand Mwen"),
+    )
+    markup.add(types.KeyboardButton("🆘 Sipò"))
+    return markup
+
+# ============================================================
+# /start - Antre nan bot la
 # ============================================================
 @bot.message_handler(commands=["start"])
 def start(message):
     chat_id = message.chat.id
+    username = message.from_user.username or message.from_user.first_name
+    ensure_user(chat_id, username)
     user_state[chat_id] = {}
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for key, pkg in PACKAGES.items():
-        markup.add(types.InlineKeyboardButton(
-            f"{pkg['label']} — {pkg['price']} HTG", callback_data=key
-        ))
     bot.send_message(
         chat_id,
-        "👋 Byenveni nan <b>Diamond Squad</b> 💎\n\n"
-        "Chwazi pak dyaman ou vle achte a anba a:",
-        reply_markup=markup
+        f"👋 Byenveni nan <b>Diamond Squad</b> 💎\n\n"
+        f"Itilize meni anba a pou navige:",
+        reply_markup=main_menu()
     )
 
 # ============================================================
-# Chwazi pak
+# Meni: 💎 Achte Dyaman
 # ============================================================
-@bot.callback_query_handler(func=lambda call: call.data in PACKAGES)
+@bot.message_handler(func=lambda m: m.text == "💎 Achte Dyaman")
+def menu_buy(message):
+    chat_id = message.chat.id
+    balance = get_balance(chat_id)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for key, pkg in PACKAGES.items():
+        markup.add(types.InlineKeyboardButton(
+            f"{pkg['label']} — {pkg['price']} HTG", callback_data=f"buy_{key}"
+        ))
+    bot.send_message(
+        chat_id,
+        f"💰 Balans ou: <b>{balance:.0f} HTG</b>\n\n"
+        "Chwazi pak dyaman ou vle achte a:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_pkg_"))
 def choose_package(call):
     chat_id = call.message.chat.id
-    pkg = PACKAGES[call.data]
-    user_state[chat_id] = {"package": pkg}
+    key = call.data.replace("buy_", "")
+    pkg = PACKAGES[key]
+    balance = get_balance(chat_id)
+
     bot.answer_callback_query(call.id)
+
+    if balance < pkg["price"]:
+        manke = pkg["price"] - balance
+        bot.send_message(
+            chat_id,
+            f"⚠️ Balans ou pa sifi pou pak sa a.\n\n"
+            f"💰 Balans aktyèl: {balance:.0f} HTG\n"
+            f"💎 Pri pak la: {pkg['price']} HTG\n"
+            f"📉 Manke: {manke:.0f} HTG\n\n"
+            f"Klike <b>➕ Ajoute Lajan</b> nan meni an pou rechaje kont ou.",
+            reply_markup=main_menu()
+        )
+        return
+
+    user_state[chat_id] = {"package": pkg}
     bot.send_message(
         chat_id,
         f"Ou chwazi: <b>{pkg['label']}</b> — {pkg['price']} HTG\n\n"
@@ -100,113 +200,66 @@ def choose_package(call):
 
 def receive_ff_id(message):
     chat_id = message.chat.id
-    ff_id = message.text.strip()
-    if chat_id not in user_state or "package" not in user_state[chat_id]:
-        bot.send_message(chat_id, "Tanpri kòmanse ak /start")
-        return
-    user_state[chat_id]["ff_id"] = ff_id
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("NatCash", callback_data="pay_natcash"),
-        types.InlineKeyboardButton("MonCash", callback_data="pay_moncash"),
-    )
-    bot.send_message(chat_id, "💳 Chwazi metòd peman ou:", reply_markup=markup)
-
-# ============================================================
-# Chwazi metòd peman
-# ============================================================
-@bot.callback_query_handler(func=lambda call: call.data in ["pay_natcash", "pay_moncash"])
-def choose_payment(call):
-    chat_id = call.message.chat.id
-    if chat_id not in user_state or "ff_id" not in user_state[chat_id]:
-        bot.answer_callback_query(call.id)
-        bot.send_message(chat_id, "Tanpri kòmanse ak /start")
-        return
-
-    method = "NatCash" if call.data == "pay_natcash" else "MonCash"
-    number = NATCASH_NUMBER if method == "NatCash" else MONCASH_NUMBER
-    user_state[chat_id]["payment_method"] = method
-
-    bot.answer_callback_query(call.id)
-    pkg = user_state[chat_id]["package"]
-    bot.send_message(
-        chat_id,
-        f"💰 Voye <b>{pkg['price']} Goud</b> sou {method}: <code>{number}</code>\n"
-        f"👤 Non kont lan: <b>{ACCOUNT_NAME}</b>\n\n"
-        "Apre ou fin voye, tanpri kopye/kole <b>referans tranzaksyon an</b> "
-        "(oswa screenshot la si ou pa gen referans) isit la:"
-    )
-    bot.register_next_step_handler(call.message, receive_reference)
-
-def receive_reference(message):
-    chat_id = message.chat.id
+    ff_id = message.text.strip() if message.content_type == "text" else None
     state = user_state.get(chat_id)
-    if not state or "payment_method" not in state:
-        bot.send_message(chat_id, "Tanpri kòmanse ak /start")
-        return
 
-    # Client ka voye swa yon tèks (referans/ID tranzaksyon) swa yon foto (screenshot)
-    photo_file_id = None
-    if message.content_type == "photo":
-        photo_file_id = message.photo[-1].file_id   # pi gwo rezolisyon an
-        reference = "📷 Screenshot (gade foto anba a)"
-    elif message.content_type == "text":
-        reference = message.text.strip()
-    else:
-        reference = "Pa gen referans/foto valid"
+    if not state or "package" not in state or not ff_id:
+        bot.send_message(chat_id, "Tanpri kòmanse ankò ak 💎 Achte Dyaman", reply_markup=main_menu())
+        return
 
     pkg = state["package"]
-    ff_id = state["ff_id"]
-    method = state["payment_method"]
+    balance = get_balance(chat_id)
+
+    if balance < pkg["price"]:
+        bot.send_message(chat_id, "⚠️ Balans ou chanje, li pa sifi ankò. Tanpri ajoute lajan.",
+                          reply_markup=main_menu())
+        return
+
     username = message.from_user.username or message.from_user.first_name
 
-    # Anrejistre kòmand lan nan baz dòne a
+    # Dedwi balans lan imedyatman epi kreye kòmand la
+    deduct_balance(chat_id, pkg["price"])
     cur.execute("""
-        INSERT INTO orders (client_chat_id, client_username, package_label, price,
-                             ff_id, payment_method, reference, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'PANN', ?)
-    """, (chat_id, username, pkg["label"], pkg["price"], ff_id, method, reference,
+        INSERT INTO orders (client_chat_id, client_username, package_label, price, ff_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'PANN', ?)
+    """, (chat_id, username, pkg["label"], pkg["price"], ff_id,
           datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     order_id = cur.lastrowid
 
-    # Konfime bay client la
+    new_balance = get_balance(chat_id)
     bot.send_message(
         chat_id,
-        "✅ Kòmand ou anrejistre! Nou pral konfime peman an epi "
-        "livre dyaman yo talè konsa. Mèsi pou konfyans ou! 💎"
+        f"✅ Acha ou fèt ak siksè!\n\n"
+        f"💎 {pkg['label']}\n"
+        f"🎮 ID: {ff_id}\n"
+        f"💰 Nouvo balans: {new_balance:.0f} HTG\n\n"
+        f"Nou pral livre dyaman yo talè konsa. Mèsi! 💎",
+        reply_markup=main_menu()
     )
 
-    # Voye mesaj bay ADMIN (ou menm) ak boutons pou aksyon rapid
     admin_markup = types.InlineKeyboardMarkup(row_width=2)
     admin_markup.add(
-        types.InlineKeyboardButton("✅ Konplete", callback_data=f"done_{order_id}"),
-        types.InlineKeyboardButton("❌ Anile", callback_data=f"cancel_{order_id}"),
+        types.InlineKeyboardButton("✅ Konplete", callback_data=f"orderdone_{order_id}"),
+        types.InlineKeyboardButton("❌ Anile", callback_data=f"ordercancel_{order_id}"),
     )
-    caption = (
-        f"🆕 <b>NOUVO KÒMAND #{order_id}</b>\n\n"
+    bot.send_message(
+        ADMIN_CHAT_ID,
+        f"🆕 <b>NOUVO KÒMAND #{order_id}</b> (peye ak Wallet)\n\n"
         f"👤 Client: @{username} (chat_id: {chat_id})\n"
         f"💎 Pak: {pkg['label']}\n"
         f"💵 Pri: {pkg['price']} HTG\n"
-        f"🎮 ID Free Fire: <code>{ff_id}</code>\n"
-        f"💳 Metòd: {method}\n"
-        f"🧾 Referans: {reference}"
+        f"🎮 ID Free Fire: <code>{ff_id}</code>",
+        reply_markup=admin_markup
     )
-
-    if photo_file_id:
-        # Voye vrè foto/screenshot la ak tout enfo kòmand la kòm kapsyon
-        bot.send_photo(ADMIN_CHAT_ID, photo_file_id, caption=caption, reply_markup=admin_markup)
-    else:
-        bot.send_message(ADMIN_CHAT_ID, caption, reply_markup=admin_markup)
 
     user_state.pop(chat_id, None)
 
 # ============================================================
-# Aksyon Admin (Konplete / Anile)
+# Aksyon Admin pou KÒMAND (Konplete / Anile)
 # ============================================================
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("done_", "cancel_")))
-def admin_action(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("orderdone_", "ordercancel_")))
+def admin_order_action(call):
     if call.message.chat.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "Ou pa otorize.")
         return
@@ -214,50 +267,264 @@ def admin_action(call):
     action, order_id = call.data.split("_")
     order_id = int(order_id)
 
-    cur.execute("SELECT client_chat_id, package_label FROM orders WHERE id=?", (order_id,))
+    cur.execute("SELECT client_chat_id, package_label, price FROM orders WHERE id=?", (order_id,))
     row = cur.fetchone()
     if not row:
         bot.answer_callback_query(call.id, "Kòmand pa jwenn.")
         return
-    client_chat_id, pkg_label = row
+    client_chat_id, pkg_label, price = row
 
-    if action == "done":
+    if action == "orderdone":
         cur.execute("UPDATE orders SET status='KONPLETE' WHERE id=?", (order_id,))
         conn.commit()
         bot.send_message(client_chat_id, f"🎉 Dyaman yo ({pkg_label}) delivre! Mèsi anpil, tounen vin achte ankò!")
-        bot.answer_callback_query(call.id, "Kòmand make konplete ✅")
+        bot.answer_callback_query(call.id, "Kòmand konplete ✅")
     else:
+        # Anile -> remèt lajan nan wallet client la
         cur.execute("UPDATE orders SET status='ANILE' WHERE id=?", (order_id,))
         conn.commit()
-        bot.send_message(client_chat_id, f"⚠️ Kòmand ou pou {pkg_label} anile. Kontakte nou pou plis enfo.")
-        bot.answer_callback_query(call.id, "Kòmand anile ❌")
+        add_balance(client_chat_id, price)
+        bot.send_message(client_chat_id,
+                          f"⚠️ Kòmand ou pou {pkg_label} anile. {price} HTG remèt nan balans ou.")
+        bot.answer_callback_query(call.id, "Kòmand anile, lajan remèt ❌")
 
-    # Chanje mesaj admin an pou l montre se fini
     try:
         bot.edit_message_reply_markup(ADMIN_CHAT_ID, call.message.message_id, reply_markup=None)
     except Exception:
         pass
 
 # ============================================================
-# Kòmand /kòmand pou wè kòmand ki poko trete (admin sèlman)
+# Meni: 💰 Kont Mwen
 # ============================================================
-@bot.message_handler(commands=["pending"])
-def pending_orders(message):
-    if message.chat.id != ADMIN_CHAT_ID:
+@bot.message_handler(func=lambda m: m.text == "💰 Kont Mwen")
+def menu_wallet(message):
+    chat_id = message.chat.id
+    balance = get_balance(chat_id)
+    bot.send_message(
+        chat_id,
+        f"💰 <b>Balans kont ou:</b> {balance:.0f} HTG\n\n"
+        "Klike ➕ Ajoute Lajan pou rechaje kont ou.",
+        reply_markup=main_menu()
+    )
+
+# ============================================================
+# Meni: ➕ Ajoute Lajan
+# ============================================================
+@bot.message_handler(func=lambda m: m.text == "➕ Ajoute Lajan")
+def menu_topup(message):
+    chat_id = message.chat.id
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [types.InlineKeyboardButton(f"{a} HTG", callback_data=f"topup_{a}") for a in TOPUP_AMOUNTS]
+    markup.add(*buttons)
+    markup.add(types.InlineKeyboardButton("Lòt montan", callback_data="topup_custom"))
+    bot.send_message(chat_id, "💵 Chwazi konbyen ou vle ajoute nan kont ou:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("topup_"))
+def choose_topup_amount(call):
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+
+    if call.data == "topup_custom":
+        bot.send_message(chat_id, "✍️ Ekri montan (an HTG) ou vle ajoute a:")
+        bot.register_next_step_handler(call.message, receive_custom_amount)
         return
-    cur.execute("SELECT id, client_username, package_label, price FROM orders WHERE status='PANN'")
+
+    amount = float(call.data.replace("topup_", ""))
+    ask_topup_payment_method(chat_id, amount)
+
+def receive_custom_amount(message):
+    chat_id = message.chat.id
+    try:
+        amount = float(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        bot.send_message(chat_id, "⚠️ Tanpri antre yon nimewo valid.", reply_markup=main_menu())
+        return
+    ask_topup_payment_method(chat_id, amount)
+
+def ask_topup_payment_method(chat_id, amount):
+    user_state[chat_id] = {"topup_amount": amount}
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("NatCash", callback_data="topuppay_natcash"),
+        types.InlineKeyboardButton("MonCash", callback_data="topuppay_moncash"),
+    )
+    bot.send_message(chat_id, f"💵 Ou pral ajoute <b>{amount:.0f} HTG</b>.\n\nChwazi metòd peman:",
+                      reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["topuppay_natcash", "topuppay_moncash"])
+def topup_choose_payment(call):
+    chat_id = call.message.chat.id
+    state = user_state.get(chat_id)
+    if not state or "topup_amount" not in state:
+        bot.answer_callback_query(call.id)
+        bot.send_message(chat_id, "Tanpri kòmanse ankò ak ➕ Ajoute Lajan", reply_markup=main_menu())
+        return
+
+    method = "NatCash" if call.data == "topuppay_natcash" else "MonCash"
+    number = NATCASH_NUMBER if method == "NatCash" else MONCASH_NUMBER
+    amount = state["topup_amount"]
+    user_state[chat_id]["topup_method"] = method
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        chat_id,
+        f"💰 Voye <b>{amount:.0f} Goud</b> sou {method}: <code>{number}</code>\n"
+        f"👤 Non kont lan: <b>{ACCOUNT_NAME}</b>\n\n"
+        "Apre ou fin voye, voye <b>referans tranzaksyon an</b> "
+        "(oswa yon screenshot) isit la:"
+    )
+    bot.register_next_step_handler(call.message, receive_topup_proof)
+
+def receive_topup_proof(message):
+    chat_id = message.chat.id
+    state = user_state.get(chat_id)
+    if not state or "topup_method" not in state:
+        bot.send_message(chat_id, "Tanpri kòmanse ankò ak ➕ Ajoute Lajan", reply_markup=main_menu())
+        return
+
+    photo_file_id = None
+    if message.content_type == "photo":
+        photo_file_id = message.photo[-1].file_id
+        reference = "📷 Screenshot (gade foto anba a)"
+    elif message.content_type == "text":
+        reference = message.text.strip()
+    else:
+        reference = "Pa gen referans/foto valid"
+
+    amount = state["topup_amount"]
+    method = state["topup_method"]
+    username = message.from_user.username or message.from_user.first_name
+
+    cur.execute("""
+        INSERT INTO deposits (client_chat_id, client_username, amount, payment_method, reference, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'PANN', ?)
+    """, (chat_id, username, amount, method, reference, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    deposit_id = cur.lastrowid
+
+    bot.send_message(
+        chat_id,
+        "✅ Demann ou anrejistre! N ap konfime peman an epi kredite kont ou talè konsa.",
+        reply_markup=main_menu()
+    )
+
+    admin_markup = types.InlineKeyboardMarkup(row_width=2)
+    admin_markup.add(
+        types.InlineKeyboardButton("✅ Aksepte", callback_data=f"depapprove_{deposit_id}"),
+        types.InlineKeyboardButton("❌ Refize", callback_data=f"depreject_{deposit_id}"),
+    )
+    caption = (
+        f"💰 <b>NOUVO DEPO #{deposit_id}</b>\n\n"
+        f"👤 Client: @{username} (chat_id: {chat_id})\n"
+        f"💵 Montan: {amount:.0f} HTG\n"
+        f"💳 Metòd: {method}\n"
+        f"🧾 Referans: {reference}"
+    )
+    if photo_file_id:
+        bot.send_photo(ADMIN_CHAT_ID, photo_file_id, caption=caption, reply_markup=admin_markup)
+    else:
+        bot.send_message(ADMIN_CHAT_ID, caption, reply_markup=admin_markup)
+
+    user_state.pop(chat_id, None)
+
+# ============================================================
+# Aksyon Admin pou DEPO (Aksepte / Refize)
+# ============================================================
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("depapprove_", "depreject_")))
+def admin_deposit_action(call):
+    if call.message.chat.id != ADMIN_CHAT_ID:
+        bot.answer_callback_query(call.id, "Ou pa otorize.")
+        return
+
+    action, dep_id = call.data.split("_")
+    dep_id = int(dep_id)
+
+    cur.execute("SELECT client_chat_id, amount FROM deposits WHERE id=?", (dep_id,))
+    row = cur.fetchone()
+    if not row:
+        bot.answer_callback_query(call.id, "Depo pa jwenn.")
+        return
+    client_chat_id, amount = row
+
+    if action == "depapprove":
+        cur.execute("UPDATE deposits SET status='APWOUVE' WHERE id=?", (dep_id,))
+        conn.commit()
+        add_balance(client_chat_id, amount)
+        new_balance = get_balance(client_chat_id)
+        bot.send_message(client_chat_id,
+                          f"✅ {amount:.0f} HTG kredite nan kont ou!\n💰 Nouvo balans: {new_balance:.0f} HTG")
+        bot.answer_callback_query(call.id, "Depo apwouve ✅")
+    else:
+        cur.execute("UPDATE deposits SET status='REFIZE' WHERE id=?", (dep_id,))
+        conn.commit()
+        bot.send_message(client_chat_id, "❌ Depo ou refize. Kontakte sipò si ou panse gen erè.")
+        bot.answer_callback_query(call.id, "Depo refize ❌")
+
+    try:
+        bot.edit_message_reply_markup(ADMIN_CHAT_ID, call.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+
+# ============================================================
+# Meni: 📦 Kòmand Mwen
+# ============================================================
+@bot.message_handler(func=lambda m: m.text == "📦 Kòmand Mwen")
+def menu_orders(message):
+    chat_id = message.chat.id
+    cur.execute("""
+        SELECT package_label, price, status, created_at FROM orders
+        WHERE client_chat_id=? ORDER BY id DESC LIMIT 10
+    """, (chat_id,))
     rows = cur.fetchall()
     if not rows:
-        bot.send_message(ADMIN_CHAT_ID, "Pa gen kòmand ki poko trete.")
+        bot.send_message(chat_id, "Ou poko fè okenn kòmand.", reply_markup=main_menu())
         return
-    text = "📋 <b>Kòmand ki poko trete:</b>\n\n"
-    for r in rows:
-        text += f"#{r[0]} - @{r[1]} - {r[2]} - {r[3]} HTG\n"
+
+    status_icon = {"PANN": "⏳", "KONPLETE": "✅", "ANILE": "❌"}
+    text = "📦 <b>10 dènye kòmand ou yo:</b>\n\n"
+    for pkg_label, price, status, created_at in rows:
+        icon = status_icon.get(status, "•")
+        text += f"{icon} {pkg_label} — {price:.0f} HTG ({created_at})\n"
+    bot.send_message(chat_id, text, reply_markup=main_menu())
+
+# ============================================================
+# Meni: 🆘 Sipò
+# ============================================================
+@bot.message_handler(func=lambda m: m.text == "🆘 Sipò")
+def menu_support(message):
+    bot.send_message(
+        message.chat.id,
+        "🆘 <b>Sipò Diamond Squad</b>\n\n"
+        f"📱 NatCash/MonCash: {NATCASH_NUMBER}\n"
+        "Ekri nou dirèkteman isit la si ou gen yon pwoblèm, "
+        "n ap reponn ou pi vit posib.",
+        reply_markup=main_menu()
+    )
+
+# ============================================================
+# Kòmand admin: /pending (kòmand ak depo ki poko trete)
+# ============================================================
+@bot.message_handler(commands=["pending"])
+def pending_all(message):
+    if message.chat.id != ADMIN_CHAT_ID:
+        return
+
+    cur.execute("SELECT id, client_username, package_label, price FROM orders WHERE status='PANN'")
+    orders = cur.fetchall()
+    cur.execute("SELECT id, client_username, amount FROM deposits WHERE status='PANN'")
+    deposits = cur.fetchall()
+
+    text = "📋 <b>Kòmand ki poko trete:</b>\n"
+    text += "\n".join(f"#{r[0]} - @{r[1]} - {r[2]} - {r[3]} HTG" for r in orders) or "Okenn"
+    text += "\n\n💰 <b>Depo ki poko trete:</b>\n"
+    text += "\n".join(f"#{r[0]} - @{r[1]} - {r[2]:.0f} HTG" for r in deposits) or "Okenn"
+
     bot.send_message(ADMIN_CHAT_ID, text)
 
 # ============================================================
 if __name__ == "__main__":
-    # Ti sèvè web pou satisfè egzijans Render (Web Service bezwen reponn sou yon pò)
     web = Flask(__name__)
 
     @web.route("/")
