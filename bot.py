@@ -1,4 +1,4 @@
-      # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Diamond Squad - Bot Telegram pou top-up Free Fire (VERSION 2)
 Estil GamexBulk/EpinBy: meni pèsistan anba a + sistèm Wallet (kont/balans)
@@ -17,6 +17,7 @@ import os
 import threading
 from datetime import datetime
 
+import requests
 import telebot
 from telebot import types
 from flask import Flask
@@ -31,6 +32,11 @@ NATCASH_NUMBER = "+509 32596064"
 MONCASH_NUMBER = "+509 31766988"
 ACCOUNT_NAME = "Lafleur Rodosky"                    # non ki sou kont NatCash/MonCash la
 
+# API pou jwenn non kont Free Fire otomatikman selon ID (twazyèm pati, pa ofisyèl)
+FREEFIRE_API_BASE = "http://siambhau69.eu.cc/freefireinfo/bhau"
+FREEFIRE_API_KEY = "diamondsquadbot:FFINFO:7CL"
+FREEFIRE_REGIONS_TO_TRY = ["BR", "SAC", "NA", "US", "ME"]  # eseye plizyè rejyon
+
 # Pri yo (an Goud/HTG) - selon flyer Diamond Squad la
 PACKAGES = {
     "pkg_1": {"label": "💎 100 + 20 Bonus Dyaman", "price": 175},
@@ -40,6 +46,10 @@ PACKAGES = {
     "pkg_5": {"label": "💎 1000 + 166 Bonus Dyaman", "price": 1500},
     "pkg_6": {"label": "💎 2000 + 398 Bonus Dyaman", "price": 3000},
     "pkg_7": {"label": "💎 5000 + 1160 Bonus Dyaman", "price": 8750},
+    "pkg_8": {"label": "🎫 Booyah Pass", "price": 750},
+    "pkg_9": {"label": "📅 Abonnement Mensuel", "price": 1750},
+    "pkg_10": {"label": "📆 Hebdomadaire", "price": 150},
+    "pkg_11": {"label": "📆 Abonnement Hebdomadaire", "price": 500},
 }
 
 # Kantite lajan pwopoze pou "Ajoute Lajan" (an HTG)
@@ -69,10 +79,17 @@ CREATE TABLE IF NOT EXISTS orders (
     package_label TEXT,
     price INTEGER,
     ff_id TEXT,
+    ff_name TEXT,
     status TEXT DEFAULT 'PANN',
     created_at TEXT
 )
 """)
+# Ajoute kolòn ff_name si baz done a te deja egziste san li (migrasyon dous)
+try:
+    cur.execute("ALTER TABLE orders ADD COLUMN ff_name TEXT")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass  # kolòn nan deja egziste
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS deposits (
@@ -117,6 +134,28 @@ def deduct_balance(chat_id, amount):
     cur.execute("UPDATE users SET balance = balance - ? WHERE chat_id=?", (amount, chat_id))
     conn.commit()
 
+def lookup_ff_nickname(ff_id):
+    """
+    Eseye jwenn non kont Free Fire a otomatikman selon ID a.
+    Eseye plizyè rejyon youn apre lòt. Retounen non an si jwenn,
+    oswa None si pa jwenn (bot la ap kontinye san erè nan ka sa a).
+    """
+    for region in FREEFIRE_REGIONS_TO_TRY:
+        try:
+            resp = requests.get(
+                FREEFIRE_API_BASE,
+                params={"uid": ff_id, "region": region, "key": FREEFIRE_API_KEY},
+                timeout=6
+            )
+            data = resp.json()
+            nickname = data.get("basicInfo", {}).get("nickname")
+            if nickname:
+                return nickname
+        except Exception as e:
+            logging.info(f"FF lookup echwe pou rejyon {region}: {e}")
+            continue
+    return None
+
 # ============================================================
 # Meni pèsistan (anba a, tankou GamexBulk/EpinBy)
 # ============================================================
@@ -159,7 +198,7 @@ def menu_buy(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for key, pkg in PACKAGES.items():
         markup.add(types.InlineKeyboardButton(
-            f"{pkg['label']} — {pkg['price']} HTG", callback_data=f"buy_{key}"
+            f"{pkg['label']} — {pkg['price']} HTG ✅ 📦", callback_data=f"buy_{key}"
         ))
     bot.send_message(
         chat_id,
@@ -203,8 +242,9 @@ def receive_ff_id(message):
     ff_id = message.text.strip() if message.content_type == "text" else None
     state = user_state.get(chat_id)
 
-    if not state or "package" not in state or not ff_id:
-        bot.send_message(chat_id, "Tanpri kòmanse ankò ak 💎 Achte Dyaman", reply_markup=main_menu())
+    if not state or "package" not in state or not ff_id or not ff_id.isdigit():
+        bot.send_message(chat_id, "⚠️ ID Free Fire dwe sèlman chif. Tanpri kòmanse ankò ak 💎 Achte Dyaman",
+                          reply_markup=main_menu())
         return
 
     pkg = state["package"]
@@ -215,24 +255,90 @@ def receive_ff_id(message):
                           reply_markup=main_menu())
         return
 
-    username = message.from_user.username or message.from_user.first_name
+    wait_msg = bot.send_message(chat_id, "🔍 M ap chèche kont lan, tann yon segond...")
+    nickname = lookup_ff_nickname(ff_id)
+    try:
+        bot.delete_message(chat_id, wait_msg.message_id)
+    except Exception:
+        pass
 
-    # Dedwi balans lan imedyatman epi kreye kòmand la
+    user_state[chat_id]["ff_id"] = ff_id
+    user_state[chat_id]["ff_name"] = nickname  # ka None si pa jwenn
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Wi, se kòrèk", callback_data="ffconfirm_yes"),
+        types.InlineKeyboardButton("❌ Non, chanje ID", callback_data="ffconfirm_no"),
+    )
+
+    if nickname:
+        bot.send_message(
+            chat_id,
+            f"✅ <b>Kont Jwenn!</b>\n\n"
+            f"👤 Non: <b>{nickname}</b>\n"
+            f"🆔 ID: <code>{ff_id}</code>\n\n"
+            f"💎 Pak: {pkg['label']}\n"
+            f"💵 Pri: {pkg['price']} HTG\n\n"
+            f"Èske enfo yo kòrèk?",
+            reply_markup=markup
+        )
+    else:
+        bot.send_message(
+            chat_id,
+            f"⚠️ Nou pa t ka jwenn non kont lan otomatikman, men ou ka kontinye.\n\n"
+            f"🆔 ID: <code>{ff_id}</code>\n"
+            f"💎 Pak: {pkg['label']}\n"
+            f"💵 Pri: {pkg['price']} HTG\n\n"
+            f"Èske ID a kòrèk?",
+            reply_markup=markup
+        )
+
+@bot.callback_query_handler(func=lambda call: call.data in ["ffconfirm_yes", "ffconfirm_no"])
+def confirm_ff_account(call):
+    chat_id = call.message.chat.id
+    state = user_state.get(chat_id)
+    bot.answer_callback_query(call.id)
+
+    if not state or "ff_id" not in state:
+        bot.send_message(chat_id, "Tanpri kòmanse ankò ak 💎 Achte Dyaman", reply_markup=main_menu())
+        return
+
+    if call.data == "ffconfirm_no":
+        bot.send_message(chat_id, "📌 Tanpri antre <b>ID Free Fire</b> ou ankò:")
+        bot.register_next_step_handler(call.message, receive_ff_id)
+        return
+
+    # Konfime -> finalize acha a
+    pkg = state["package"]
+    ff_id = state["ff_id"]
+    ff_name = state.get("ff_name")
+    balance = get_balance(chat_id)
+
+    if balance < pkg["price"]:
+        bot.send_message(chat_id, "⚠️ Balans ou chanje, li pa sifi ankò. Tanpri ajoute lajan.",
+                          reply_markup=main_menu())
+        user_state.pop(chat_id, None)
+        return
+
+    username = call.from_user.username or call.from_user.first_name
+
     deduct_balance(chat_id, pkg["price"])
     cur.execute("""
-        INSERT INTO orders (client_chat_id, client_username, package_label, price, ff_id, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'PANN', ?)
-    """, (chat_id, username, pkg["label"], pkg["price"], ff_id,
+        INSERT INTO orders (client_chat_id, client_username, package_label, price, ff_id, ff_name, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'PANN', ?)
+    """, (chat_id, username, pkg["label"], pkg["price"], ff_id, ff_name,
           datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     order_id = cur.lastrowid
 
     new_balance = get_balance(chat_id)
+    nom_ligne = f"👤 Non: {ff_name}\n" if ff_name else ""
     bot.send_message(
         chat_id,
         f"✅ Acha ou fèt ak siksè!\n\n"
         f"💎 {pkg['label']}\n"
-        f"🎮 ID: {ff_id}\n"
+        f"{nom_ligne}"
+        f"🆔 ID: {ff_id}\n"
         f"💰 Nouvo balans: {new_balance:.0f} HTG\n\n"
         f"Nou pral livre dyaman yo talè konsa. Mèsi! 💎",
         reply_markup=main_menu()
@@ -243,13 +349,15 @@ def receive_ff_id(message):
         types.InlineKeyboardButton("✅ Konplete", callback_data=f"orderdone_{order_id}"),
         types.InlineKeyboardButton("❌ Anile", callback_data=f"ordercancel_{order_id}"),
     )
+    nom_admin_ligne = f"👤 Non FF: <b>{ff_name}</b>\n" if ff_name else "👤 Non FF: <i>pa jwenn otomatikman</i>\n"
     bot.send_message(
         ADMIN_CHAT_ID,
         f"🆕 <b>NOUVO KÒMAND #{order_id}</b> (peye ak Wallet)\n\n"
-        f"👤 Client: @{username} (chat_id: {chat_id})\n"
+        f"👤 Client Telegram: @{username} (chat_id: {chat_id})\n"
+        f"{nom_admin_ligne}"
+        f"🆔 ID Free Fire: <code>{ff_id}</code>\n"
         f"💎 Pak: {pkg['label']}\n"
-        f"💵 Pri: {pkg['price']} HTG\n"
-        f"🎮 ID Free Fire: <code>{ff_id}</code>",
+        f"💵 Pri: {pkg['price']} HTG",
         reply_markup=admin_markup
     )
 
