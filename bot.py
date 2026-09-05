@@ -8,10 +8,13 @@ Pa gen sit web ki nesesè - tout bagay pase sou Telegram.
 
 import sqlite3
 import logging
+import os
+import threading
 from datetime import datetime
 
 import telebot
 from telebot import types
+from flask import Flask
 
 # ============================================================
 # KONFIGIRASYON - CHANJE VALÈ SA YO ANVAN OU DEPLOYE
@@ -254,5 +257,18 @@ def pending_orders(message):
 
 # ============================================================
 if __name__ == "__main__":
-    print("Bot ap kouri...")
-    bot.infinity_polling()
+    # Ti sèvè web pou satisfè egzijans Render (Web Service bezwen reponn sou yon pò)
+    web = Flask(__name__)
+
+    @web.route("/")
+    def home():
+        return "Diamond Squad bot ap kouri! 💎"
+
+    def run_bot():
+        print("Bot ap kouri...")
+        bot.infinity_polling()
+
+    threading.Thread(target=run_bot).start()
+
+    port = int(os.environ.get("PORT", 5000))
+    web.run(host="0.0.0.0", port=port)
